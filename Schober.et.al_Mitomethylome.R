@@ -6,7 +6,7 @@
 ### derived from the data analysed herein. ###
 ### The code requires a folder "Data", in which all evidence files, MaxQuant PTM ###
 ### identification files and MethylQuant output files (named "MethQ_H_out_.*.csv") ###
-### are in subfolder uniquely named. ###
+### are in subfolder uniquely named. ### 
 ### Additionally, a Drosophila mitocarta file as well as a mapping of mammalian homologs ###
 ### will be required. ###
 
@@ -21,6 +21,7 @@ library("doParallel")
 library("ggpubr")
 library("ggseqlogo")
 library("org.Dm.eg.db")
+library("ggrepel")
 
 #######################################################
 ## A: Unique sites list of all sites in MQ PTM files ##
@@ -381,9 +382,6 @@ d %>%
 ## C: Shiftome and Mitomethylome overlap ##
 ###########################################
 
-load("Shiftome")
-load("Siteome")
-
 shiftome %>%
   dplyr::select(-c(Sequence)) %>%
   dplyr::rename(Protein = uniprot, Intensity = Int, Sequence = mod_seq) %>%
@@ -406,7 +404,7 @@ mitomethylome <- full_join(shiftome, siteome) %>%
 mitomethylome %>%
   group_by(ID) %>%
   top_n(n = -1, Confidence_Measure) %>%#  Counter intuitive that A is the lower end of the scale, this is why n = -1
-  distinct(ID, .keep_all = TRUE) -> mitomethylome # Counter intuitive that A is the lower end of the scale, this is why n = -1
+  distinct(ID, .keep_all = TRUE) -> mitomethylome
 
 write_tsv(mitomethylome, paste("Methylomes/Mitomethylome_", date(), ".txt", sep = ""))
 
@@ -415,6 +413,59 @@ mitomethylome_hc <- filter(mitomethylome, Confidence_Measure != "F" & Confidence
 mitomethylome_hc %>%
   mutate(Amino.ID = paste(Protein, Specific_position_in_protein, sep = ";")) %>%
   distinct(Amino.ID, .keep_all = TRUE) -> cat.mitomethylome_hc
+
+## Modifications by category
+cat.mitomethylome_hc %>%
+  group_by(Mito.process)%>%
+  summarize(n=n()) %>%
+  mutate(from = "pool") %>%
+  dplyr::rename(to = Mito.process, value = n) %>%
+  dplyr::select(from, to, value) %>%
+  arrange(value) -> mitomethylome_hc.cat.summary
+
+### --- Figure 4B --- ###
+cairo_pdf("Figures/Mito.process_circos.pdf", 5, 5)
+chordDiagram(mitomethylome_hc.cat.summary, big.gap = 10, small.gap = 2)
+dev.off()
+
+## Are processes under-/overrepresented in mitocarta in comparison to size of the category?
+mitomethylome_hc.cat.summary$methylome <- mitomethylome_hc.cat.summary$value/sum(mitomethylome_hc.cat.summary$value)
+mitocarta.summary <- data.frame(table(mitocarta$Mitochondrial.Process))
+colnames(mitocarta.summary) <- c("to", "library.size")
+
+mitomethylome_cat.ratio <- left_join(mitomethylome_hc.cat.summary, mitocarta.summary)
+mitomethylome_cat.ratio$library.size.ratio <- mitomethylome_cat.ratio$library.size/sum(mitomethylome_cat.ratio$library.size)
+
+mitomethylome_cat.ratio$ratio <- log2(mitomethylome_cat.ratio$methylome/mitomethylome_cat.ratio$library.size.ratio)
+
+### --- Figure 4C --- ###
+cairo_pdf("Figures/Absolute_N_per_cat.pdf", 6, 4)
+ggplot(data = mitomethylome_cat.ratio, aes(x = library.size, y = value))+
+  stat_smooth(method='lm', formula= y~x, level = 0.99)+
+  geom_point()+
+  theme_bw()+
+  geom_text_repel(data = mitomethylome_cat.ratio[abs(mitomethylome_cat.ratio$ratio) > 1.0,],
+                  aes(x = library.size, y = value, label = to))
+dev.off()
+
+## Returning Standardised Residuals
+mitomethylome_cat.ratio.lm = lm(value ~ library.size, data=mitomethylome_cat.ratio) 
+rstandard(mitomethylome_cat.ratio.lm) 
+
+### --- Figure S3C --- ###
+# Waffle chart of categorisation
+library(waffle)
+library(RColorBrewer)
+cairo_pdf("Figures/Waffle-plot_thresholding.pdf", 20, 4)
+members <- c(`A - High confidence shift, p(localization) > 0.8` = 60, `B - Light + heavy detected, p(localization) > 0.8` = 11,
+             `C - High confidence shift, no clear localization` = 26, `D - Medium confidence shift, no clear localization` = 27,
+             `E - p(localization) = 1, low confidence or no shift` = 91, `F - p(localization) > 0.8, low confidence or no shift` = 70,
+             `G - p(localization) < 0.8` = 71, `H - low confidence shift, unclear localization` = 19, `I - spurious signal` = 280)
+waffle(members, rows=5, size=0.5,
+       title="Mitomethylome: thresholding", 
+       xlab="1 square = 1 unique modification",
+       colors=c("#B2182B", "#D6604D", "#F4A582", "#FDDBC7", "#F1F1F1", "#D1E5F0", "#92C5DE", "#4393C3", "#2166AC"))
+dev.off()
 
 #####################
 ## D: Conservation ##
@@ -619,6 +670,10 @@ evo_tracing %>%
   mutate(conserved.RAT = str_replace_all(evo_tracing$conserved.RAT, ";.*", "")) %>%
   spread(origin.FLY, conserved.RAT) -> evo_tracing_rat
 
+evo_tracing_rat %>%
+  mutate(distinct = str_replace(conserved.ID, ";Me|;Di|;Tri", "")) %>%
+  distinct(distinct, .keep_all = TRUE) -> evo_tracing_rat
+
 circo_input_rat <- data.frame(from = c(rep("Dm.K", length(table(evo_tracing_rat$K))), rep("Dm.R", length(table(evo_tracing_rat$R)))),
                               to = c(names(table(evo_tracing_rat$K)), names(table(evo_tracing_rat$R))),
                               value = c(table(evo_tracing_rat$K), table(evo_tracing_rat$R)))
@@ -631,6 +686,10 @@ evo_tracing %>%
   mutate(conserved.MOUSE = str_replace_all(evo_tracing$conserved.MOUSE, ";.*", "")) %>%
   spread(origin.FLY, conserved.MOUSE) -> evo_tracing_mouse
 
+evo_tracing_mouse %>%
+  mutate(distinct = str_replace(conserved.ID, ";Me|;Di|;Tri", "")) %>%
+  distinct(distinct, .keep_all = TRUE) -> evo_tracing_mouse
+
 circo_input_mouse <- data.frame(from = c(rep("Dm.K", length(table(evo_tracing_mouse$K))), rep("Dm.R", length(table(evo_tracing_mouse$R)))),
                                 to = c(names(table(evo_tracing_mouse$K)), names(table(evo_tracing_mouse$R))),
                                 value = c(table(evo_tracing_mouse$K), table(evo_tracing_mouse$R)))
@@ -642,6 +701,10 @@ circo_input_mouse %>%
 evo_tracing %>%
   mutate(conserved.HUMAN = str_replace_all(evo_tracing$conserved.HUMAN, ";.*", "")) %>%
   spread(origin.FLY, conserved.HUMAN) -> evo_tracing_human
+
+evo_tracing_human %>%
+  mutate(distinct = str_replace(conserved.ID, ";Me|;Di|;Tri", "")) %>%
+  distinct(distinct, .keep_all = TRUE) -> evo_tracing_human
 
 circo_input_human <- data.frame(from = c(rep("Dm.K", length(table(evo_tracing_human$K))), rep("Dm.R", length(table(evo_tracing_human$R)))),
                                 to = c(names(table(evo_tracing_human$K)), names(table(evo_tracing_human$R))),
@@ -658,6 +721,15 @@ circo_input_human$fraction <- circo_input_human$value / sum(circo_input_human[ci
 circo_input_human$fraction[circo_input_human$from == "Dm.R"] <- circo_input_human$value[circo_input_human$from == "Dm.R"] / sum(circo_input_human[circo_input_human$from == "Dm.R",]$value)
 
 methylome_hs_mut.rate <- circo_input_human
+
+### --- Figure 5C --- ###
+cairo_pdf("Figures/Conservation_circos.plots.pdf", 10, 3)
+par(mfrow = c(1,3))
+chordDiagram(circo_input_rat, big.gap = 10, small.gap = 2)
+chordDiagram(circo_input_mouse, big.gap = 10, small.gap = 2)
+chordDiagram(circo_input_human, big.gap = 10, small.gap = 2)
+dev.off()
+
 
 #################################
 ## F. Background mutation rate ##
@@ -742,6 +814,13 @@ circo_input_human <- data.frame(from = c(rep("Dm.K", length(table(evo_tracing_hu
                                 to = c(names(table(evo_tracing_human$K)), names(table(evo_tracing_human$R))),
                                 value = c(table(evo_tracing_human$K), table(evo_tracing_human$R)))
 
+cairo_pdf("Figures/Conservation_background..methylome.proteins_circos.plots.pdf", 10, 3)
+par(mfrow = c(1,3))
+chordDiagram(circo_input_rat, big.gap = 10, small.gap = 2)
+chordDiagram(circo_input_mouse, big.gap = 10, small.gap = 2)
+chordDiagram(circo_input_human, big.gap = 10, small.gap = 2)
+dev.off()
+
 # Calculate mutation rate in percent
 sum(circo_input_human[circo_input_human$from == "Dm.K",]$value)
 sum(circo_input_human[circo_input_human$from == "Dm.R",]$value)
@@ -761,8 +840,42 @@ left_join(methylome.BG_hs_mut.rate, methylome_hs_mut.rate, by = c("from", "to"))
 
 hs_mut.rate$fraction[is.na(hs_mut.rate$fraction)] <- 0
 
+hs_mut.rate %>% 
+  mutate(origin = str_replace_all(ID, ";.*", "")) %>%
+  mutate(destination = str_replace_all(ID, ".*;", "")) -> hs_mut.rate
+
+### --- Figure S3D --- ###
+cairo_pdf("Figures/Mutation_fraction.pdf", 7, 4)
+ggplot(data = hs_mut.rate, aes (x = destination, y = fraction, fill = type))+
+  geom_bar(stat="identity", color="black", position=position_dodge())+
+  theme_minimal() +
+  scale_fill_manual(values=c('black','white'))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  coord_cartesian(ylim = c(0, 0.6))+
+  facet_grid(origin~.)
+dev.off()
+
+########################################################
+## G. Joining PhosphoSitePlus-known methylation sites ##
+########################################################
+
+psp <- read_tsv("External_Data/PhosphoSitePlus_methylation_191024.txt")
+psp %>%
+  filter(ORGANISM == "human") -> psp.human
+
+mitomethylome_hc %>%
+  filter(str_replace(conserved$HUMAN, ";.*", "") == origin.FLY) %>%
+  mutate(Human.short = paste(Hs.homolog, ";",
+                             str_replace(conserved$HUMAN, ";", ""),
+                             "-", 
+                             str_replace_all(ID, c(".*;" = "", "heavy " = "", "Me" = "m1", "Di" = "m2", "Tri" = "m3")), sep = "")) %>%
+  mutate(PSP.human = Human.short %in% paste(psp$GENE, ";", psp$MOD_RSD, sep ="")) -> mitomethylome_hc.cons.HS 
+
+
+write.table(mitomethylome_hc.cons.HS, file = paste("Methylomes/Mitomethylome_conservedHS", date(), ".txt", sep = ""), sep = "\t", row.names = F)
+
 ##########################
-## G. Proteome coverage ##
+## H. Proteome coverage ##
 ##########################
 
 # Step 1: Load all amino acid sequences of proteins in the fly mitocarta
@@ -921,8 +1034,26 @@ uncoveredAA_collapsed_trypsin <- str_replace_all(paste(mitocarta_uniprot$uncover
 uncoveredAA_collapsed_chymo <- str_replace_all(paste(mitocarta_uniprot$uncoveredAA_chymo, collapse = ""), "\\.", "")
 1-table(str_split(uncoveredAA_collapsed_chymo, pattern = "")) / table(str_split(paste(mitocarta_uniprot$fasta, collapse = ""), pattern = ""))
 
+# Boxplotting the threshold
+
+plot.boxplot_ConfMeas <- ggplot(data = mitomethylome, aes(x= Confidence_Measure, y = log2(Intensity)))+
+  geom_boxplot()+
+  theme_bw()
+
+plot.boxplot_LocProb <- ggplot(data = mitomethylome, aes(x= Confidence_Measure, y = Localization_prob))+
+  geom_boxplot()+
+  theme_bw()
+
+ggplot(data = mitomethylome, aes(x= Confidence_Measure, y = shiftome_score))+
+  geom_boxplot()+
+  theme_bw()
+
+cairo_pdf("Figures/Boxplot_Justifying-threshold.pdf", 8, 3)
+ggarrange(plot.boxplot_ConfMeas, plot.boxplot_LocProb)
+dev.off()
+
 ########################
-## H. Sequence logos ##
+## I. Sequence logos ##
 ########################
 mitomethylome_hc_logo <- mitomethylome_hc[!duplicated(sub("(Me|Di|Tri)", "", mitomethylome_hc$Readable_ID)),]
 mapping <- UniProt.ws::select(up.fly, mitomethylome_hc_logo$Protein, "SEQUENCE", "UNIPROTKB")
@@ -930,7 +1061,6 @@ mitomethylome_hc_logo$Sequence <- mapping[match(mitomethylome_hc_logo$Protein, m
 
 windows <- c()
 for(i in c(1:dim(mitomethylome_hc_logo)[1])){
-  #i = 56
   pos <- mitomethylome_hc_logo[i,"Specific_position_in_protein"]
   length <- nchar(mitomethylome_hc_logo[i,"Sequence"])
   
@@ -970,10 +1100,40 @@ seqTot <- ggseqlogo(mitomethylome_hc_logo$window)
 seqK <- ggseqlogo(mitomethylome_hc_logo[mitomethylome_hc_logo$origin.FLY == "K",]$window)
 seqR <- ggseqlogo(mitomethylome_hc_logo[mitomethylome_hc_logo$origin.FLY == "R",]$window)
 
+# And Export
+cairo_pdf("Figures/Seqlogos.pdf", 3,8)
+ggarrange(seqTot, seqK, seqR, ncol = 1)
+dev.off()
 
 ##########################################
-## I. Position along polypeptide chain ##
+## J. Position along polypeptide chain ##
 #########################################
+
+library("ggrepel")
 
 mitomethylome_hc_logo$fraction_in_chain <- mitomethylome_hc_logo$Specific_position_in_protein / nchar(mitomethylome_hc_logo$Sequence)
 mitomethylome_hc_logo$random <- sample(-10:10, dim(mitomethylome_hc_logo)[1], replace=T)/10
+
+
+cairo_pdf("Figures/Position_along_polypeptide_chain.pdf")
+ggplot(mitomethylome_hc_logo, aes(x=fraction_in_chain, y=random)) + 
+  geom_point() +
+  geom_text_repel(data = mitomethylome_hc_logo[mitomethylome_hc_logo$Specific_position_in_protein <= 25,], 
+                  aes(x=fraction_in_chain, y=random , label = paste(Readable_ID, origin.FLY)),
+                  nudge_y      = 0.05,
+                  direction    = "x",
+                  angle        = 90,
+                  vjust        = 0,
+                  segment.size = 0.2)+
+  coord_cartesian(ylim = c(-10, 10))+
+  geom_density()+
+  theme_classic()
+
+dev.off()
+
+### --- Figure S7B --- ###
+cairo_pdf("Figures/Position_along_polypeptide_chain_density.pdf")
+ggplot(mitomethylome_hc_logo, aes(x = fraction_in_chain))+
+  geom_density()+
+  theme_classic()
+dev.off()
